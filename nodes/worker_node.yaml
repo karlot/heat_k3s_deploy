@@ -1,0 +1,111 @@
+heat_template_version: queens
+
+description: |
+  Heat template for deploying Worker k3s nodes
+
+parameters:
+  index:
+    type: string
+  addresses:
+    type: comma_delimited_list
+  network:
+    type: string
+  image:
+    type: string
+  base_config:
+    type: string
+  flavor:
+    type: string
+  primary_ip:
+    type: string
+  init_delay:
+    type: string
+    default: 0
+  join_delay:
+    type: string
+    default: 30
+  k3s_channel:
+    type: string
+    default: stable
+  k3s_version:
+    type: string
+    default: ""
+  k3s_env_extra:
+    type: string
+    default: ""
+  k3s_token:
+    type: string
+    default: SECRET
+
+
+resources:
+  fixed_ip:
+    type: OS::Heat::Value
+    properties:
+      value: { get_param: [ addresses, { get_param: index }]}
+  
+  server_port:
+    type: OS::Neutron::Port
+    properties:
+      name: 
+        list_join:
+          - ""
+          - [ "K3s-worker-", { get_param: index }, "-port0" ]
+      network: { get_param: network }
+      fixed_ips:
+        - ip_address: { get_attr: [ fixed_ip, value ]}
+      port_security_enabled: false
+      security_groups: []
+
+  boot_script:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ungrouped
+      config:
+        str_replace:
+          template: |
+            #!/bin/bash
+            set -xe
+            sleep __INIT_DELAY__
+            # Export K3s ENV vars
+            export INSTALL_K3S_CHANNEL=__K3S_CHANNEL__
+            export INSTALL_K3S_VERSION=__K3S_VERSION__
+            export K3S_TOKEN=__K3S_TOKEN__
+            echo "Starting installation on joining worker node!"
+            sleep __JOIN_DELAY__;
+            curl -sfL https://get.k3s.io | __K3S_EXTRA__ sh -s - agent --server https://__PRIMARY__:6443
+            wall "K3s finished!"
+          params:
+            __INIT_DELAY__: { get_param: init_delay }
+            __JOIN_DELAY__: { get_param: join_delay }
+            __K3S_TOKEN__: { get_param: k3s_token }
+            __K3S_CHANNEL__: { get_param: k3s_channel }
+            __K3S_VERSION__: { get_param: k3s_version }
+            __K3S_EXTRA__: { get_param: k3s_env_extra }
+            __PRIMARY__: { get_param: primary_ip }
+
+  server_init:
+    type: OS::Heat::MultipartMime
+    properties:
+      parts:
+      - config: { get_param: base_config }
+      - config: { get_resource: boot_script }
+
+  server:
+    type: OS::Nova::Server
+    properties:
+      name:
+        list_join:
+          - ""
+          - [ "K3s-worker-", { get_param: index }]
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      networks:
+        - port: { get_resource: server_port }
+      user_data_format: SOFTWARE_CONFIG   #SOFTWARE_CONFIG, RAW
+      user_data: { get_resource: server_init }
+
+
+outputs:
+  OS::stack_id:
+    value: { get_resource: server }

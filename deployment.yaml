@@ -1,0 +1,166 @@
+#// -----------------------------------------------------------------------------------------------
+#// Heat template for dynamically deploying K3s cluster with automatic provisioning
+#// -----------------------------------------------------------------------------------------------
+heat_template_version: queens
+
+description: |
+  Heat template for setting up k3s cluster
+
+parameters:
+  deployment_image:
+    type: string
+    description: Deployment OS image for cluster
+    constraints:
+      - custom_constraint: glance.image
+        description: Defined image must be already be created in openstack glance
+    immutable: true
+  deployment_network:
+    type: string
+    description: Target network for deployment
+    constraints:
+      - custom_constraint: neutron.network
+        description: Defined network must be already be created in openstack neutron
+    immutable: true
+  master_count:
+    type: number
+    description: Number of Master nodes in cluster
+    default: 1
+    constraints:
+      - range: { min: 1 }
+        description: There must be minimum 1 master node
+  worker_count:
+    type: number
+    description: Number of Worker nodes in cluster
+    default: 1
+  master_flavor:
+    type: json
+    description: Definitions for Master flavor creation
+    default:
+      vcpus: 2
+      ram: 4096
+      disk: 20
+    immutable: true
+  worker_flavor:
+    type: json
+    description: Definitions for Worker flavor creation
+    default:
+      vcpus: 4
+      ram: 8192
+      disk: 20
+    immutable: true
+  master_fixed_ips:
+    type: comma_delimited_list
+    description: List of IP addresses for Master nodes to use
+  worker_fixed_ips:
+    type: comma_delimited_list
+    description: List of IP addresses for Worker nodes to use
+  common_flavor_spec:
+    type: json
+    description: Additional flavor extra-specs to use for flavor creation
+    default: {}
+    immutable: true
+  cloud_config:
+    type: json
+    description: Cloud-config data to provision on all created nodes
+    default:
+      ssh_pwauth: true
+      users:
+        - name: snt
+          lock_passwd: false
+          plain_text_passwd: littlepony
+          shell: /bin/bash
+          sudo: ALL=(ALL) NOPASSWD:ALL
+    immutable: true
+
+
+conditions:
+  #// Check if worker count is higher than 0
+  #// used to conditionally create flavor and resource group for Worker nodes
+  install_workers:
+    not:
+      equals : 
+        - get_param: worker_count
+        - 0
+
+
+resources:
+  #// -----------------------------------------------------------
+  #// K3s custom flavors
+  #// -----------------------------------------------------------
+  mflavor:
+    type: OS::Nova::Flavor
+    properties:
+      name: k3s_master_flavor
+      ram: { get_param: [ master_flavor, ram ]}
+      vcpus: { get_param: [ master_flavor, vcpus ]}
+      disk: { get_param: [ master_flavor, disk ]}
+      extra_specs: { get_param: common_flavor_spec }
+
+  wflavor:
+    type: OS::Nova::Flavor
+    condition: install_workers
+    properties:
+      name: k3s_worker_flavor
+      ram: { get_param: [ worker_flavor, ram ]}
+      vcpus: { get_param: [ worker_flavor, vcpus ]}
+      disk: { get_param: [ worker_flavor, disk ]}
+      extra_specs: { get_param: common_flavor_spec }
+
+  #// -----------------------------------------------------------
+  #// Load user data
+  #// -----------------------------------------------------------
+  base_config:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config: { get_param: cloud_config }
+
+  #// -----------------------------------------------------------
+  #// Kube Masters
+  #// -----------------------------------------------------------
+  primary_node_ip:
+    type: OS::Heat::Value
+    properties:
+      value: { get_param: [ master_fixed_ips, 0 ]}
+
+  #// -----------------------------------------------------------
+  #// Kube Masters
+  #// -----------------------------------------------------------
+  masters_group:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: master_count }
+      # removal_policies_mode: update
+      # removal_policies: []
+      resource_def:
+        type: SNT::K3S::master
+        properties:
+          index: "%index%"
+          addresses: { get_param: master_fixed_ips }
+          network: { get_param: deployment_network }
+          image: { get_param: deployment_image }
+          flavor: { get_resource: mflavor }
+          base_config: { get_resource: base_config }
+          primary_ip: { get_attr: [ primary_node_ip, value ]}
+
+  #// -----------------------------------------------------------
+  #// Kube Workers
+  #// -----------------------------------------------------------
+  worker_group:
+    type: OS::Heat::ResourceGroup
+    condition: install_workers
+    depends_on: masters_group
+    properties:
+      count: { get_param: worker_count }
+      # removal_policies_mode: update
+      # removal_policies: []
+      resource_def:
+        type: SNT::K3S::worker
+        properties:
+          index: "%index%"
+          addresses: { get_param: worker_fixed_ips }
+          network: { get_param: deployment_network }
+          image: { get_param: deployment_image }
+          flavor: { get_resource: wflavor }
+          base_config: { get_resource: base_config }
+          primary_ip: { get_attr: [ primary_node_ip, value ]}
+
